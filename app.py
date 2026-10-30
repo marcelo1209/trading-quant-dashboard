@@ -16,7 +16,7 @@ st.set_page_config(
 st.title("📈 Dashboard Cuantitativo & Simulador Prop Firm (LucidFlex)")
 
 # -----------------------------------------------------------------------------
-# Estrategia Backtrader (EMA 16/35 + ADX + Filtro SPY + Risk Management)
+# Estrategia Backtrader con Detención por Reglas Prop Firm
 # -----------------------------------------------------------------------------
 class EmaAdxStrategy(bt.Strategy):
     params = (
@@ -28,6 +28,10 @@ class EmaAdxStrategy(bt.Strategy):
         ('stop_points', 50.0),      # Stop loss en puntos
         ('target_points', 150.0),   # Take profit en puntos
         ('contracts', 1),
+        ('enable_prop_stop', True), # Detener cuando alcance target o max DD
+        ('initial_cash', 50000.0),
+        ('max_dd_limit', 2000.0),
+        ('profit_target', 3000.0),
     )
 
     def __init__(self):
@@ -43,10 +47,34 @@ class EmaAdxStrategy(bt.Strategy):
             self.spy_sma = None
 
         self.order = None
+        self.peak_value = self.params.initial_cash
 
     def next(self):
+        current_val = self.broker.getvalue()
+
+        # Actualizar pico máximo para control de Drawdown EOD
+        if current_val > self.peak_value:
+            self.peak_value = current_val
+
+        current_dd = self.peak_value - current_val
+        pnl = current_val - self.params.initial_cash
+
+        # Control de parada temprana en simulación Prop Firm
+        if self.params.enable_prop_stop:
+            if current_dd >= self.params.max_dd_limit:
+                if self.position:
+                    self.close()
+                self.env.runstop()  # Detener backtest por violar Drawdown
+                return
+
+            if pnl >= self.params.profit_target:
+                if self.position:
+                    self.close()
+                self.env.runstop()  # Detener backtest por alcanzar Target de $3,000
+                return
+
         if self.order:
-            return  # Esperar orden pendiente
+            return  # Esperar a que la orden pendiente se complete
 
         market_bullish = True
         if self.spy_close is not None and self.spy_sma is not None:
@@ -61,7 +89,6 @@ class EmaAdxStrategy(bt.Strategy):
                 stop_price = price - self.params.stop_points
                 target_price = price + self.params.target_points
 
-                # Entrar comprando con OCO (Stop Loss y Take Profit fijos)
                 self.order = self.buy(size=self.params.contracts)
                 self.sell(size=self.params.contracts, price=stop_price, exectype=bt.Order.Stop, oco=self.order)
                 self.sell(size=self.params.contracts, price=target_price, exectype=bt.Order.Limit, oco=self.order)
@@ -289,7 +316,8 @@ if st.session_state.executed:
                             adx_threshold=adx_threshold,
                             stop_points=stop_points,
                             target_points=target_points,
-                            contracts=num_contracts
+                            contracts=num_contracts,
+                            enable_prop_stop=enable_prop_sim
                         )
 
                         if enable_prop_sim:
